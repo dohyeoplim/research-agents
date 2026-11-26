@@ -1,0 +1,12 @@
+{
+    "scholar": {
+        "name": "Scholar",
+        "instructions": "Help research, reading and writing. Cite sources and separate evidence from guesses.",
+        "sandbox": "workspace-write",
+        "networkAccess": false,
+        "webSearch": "live",
+        "timeoutSeconds": 600,
+        "skills": [],
+        "delegates": []
+    }
+}

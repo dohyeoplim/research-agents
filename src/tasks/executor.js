@@ -1,0 +1,88 @@
+import { loadConfig } from "../channels/config.js";
+import { withSlackActivity } from "../slack/activity.js";
+import { knowledgeContext } from "../knowledge/memory.js";
+import { sessionFor } from "./runtime.js";
+import { resourceContext } from "../resources/context.js";
+import { workerResponse } from "./response.js";
+import { providerError } from "../shared/diagnostics.js";
+
+export function createTaskExecutor({
+    state, token, resources, streams, toolServer, historyContext,
+    config = loadConfig, request = fetch, activity = withSlackActivity,
+}) {
+    return async (task, signal) => {
+        const research = Boolean(task.researchId);
+        const current = await config();
+        const route = current.channels[task.channel];
+        if (!route || route.enabled === false || task.team !== current.team || !current.users.includes(task.user)) {
+            throw Error("Task is no longer authorized");
+        }
+        const endpoint = "http://" + route.agent + ":8080";
+        let grant;
+        const abort = () => {
+            request(endpoint + "/cancel", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ id: task.id }), signal: AbortSignal.timeout(5000),
+            }).catch(() => {});
+        };
+        signal.addEventListener("abort", abort, { once: true });
+        try {
+            const showActivity = research ? async (context, run) => run() : activity;
+            return await showActivity({
+                token, channel: task.channel, thread: task.thread,
+            }, async () => {
+                if (signal.aborted) throw Error("Task cancelled");
+                const data = state.snapshot();
+                const session = research ? undefined : sessionFor(data, task);
+                const history = historyContext && (!research || task.researchStage === "clarify") ?
+                    await historyContext.hydrate(task, session, signal) : { text: "" };
+                const sources = resources ?
+                    await resources.collect(task, signal, { discover: !research }) :
+                    { sources: [], notices: [] };
+                const sourceContext = resourceContext(sources, task.prompt);
+                if (signal.aborted) throw Error("Task cancelled");
+                grant = toolServer?.grant(task, signal);
+                const response = await request(endpoint + "/run", {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        id: task.id, channel: task.channel, prompt: task.prompt,
+                        profile: task.profile, skill: task.skill, session,
+                        context: knowledgeContext(data, task, task.prompt),
+                        sourceContext, historyContext: history.text,
+                        images: sources.images || [],
+                        stream: research || Boolean(streams),
+                        ...(research ? { researchId: task.researchId, researchStage: task.researchStage,
+                            researchRunId: task.researchRunId,
+                            provider: task.provider || "codex" } : {}),
+                        toolToken: grant?.token,
+                    }),
+                    signal: research ? signal : AbortSignal.any([signal, AbortSignal.timeout(620000)]),
+                }).catch((error) => { throw providerError(task.provider || "codex", error, "WORKER_FAILED"); });
+                const result = await workerResponse(response, research ? undefined :
+                    (text) => streams?.update(task, text), { longRunning: research,
+                    onProgress: research ? async (progress) => {
+                        signal.throwIfAborted();
+                        await state.update((draft) => {
+                            signal.throwIfAborted();
+                            const saved = draft.tasks?.[task.id];
+                            const job = draft.researchJobs?.[task.researchId];
+                            if (saved?.status !== "running" || saved.researchId !== task.researchId ||
+                                saved.researchRunId !== task.researchRunId || job?.runId !== task.researchRunId ||
+                                !["running", "clarifying"].includes(job?.status) ||
+                                progress.providerEvents < (saved.providerEvents || 0) ||
+                                progress.lastActivityAt < (saved.lastActivityAt || 0)) return;
+                            Object.assign(saved, progress);
+                        });
+                    } : undefined,
+                });
+                if (typeof result.answer !== "string" || !/^[0-9a-f-]{36}$/i.test(result.session || "")) {
+                    throw Error("Invalid worker response");
+                }
+                return { ...result, historyReceipt: history.receipt };
+            });
+        } finally {
+            grant?.revoke();
+            signal.removeEventListener("abort", abort);
+        }
+    };
+}

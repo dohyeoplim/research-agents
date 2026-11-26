@@ -1,0 +1,101 @@
+services:
+  database:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: agents
+      POSTGRES_USER: agents
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - database:/var/lib/postgresql/data
+    networks: [bridge]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U agents -d agents"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  gateway:
+    build:
+      context: .
+      target: base
+    environment:
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:?Set SLACK_BOT_TOKEN}
+      SLACK_APP_TOKEN: ${SLACK_APP_TOKEN:?Set SLACK_APP_TOKEN}
+      RESEARCH_MAX_CYCLES: ${RESEARCH_MAX_CYCLES:-3}
+      RESEARCH_MAX_DURATION_SECONDS: ${RESEARCH_MAX_DURATION_SECONDS:-3600}
+      PGHOST: database
+      PGDATABASE: agents
+      PGUSER: agents
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - ./config:/config:ro
+      - ./data/gateway:/state
+    networks: [bridge, internet]
+    depends_on:
+      database:
+        condition: service_healthy
+      assistant:
+        condition: service_healthy
+    init: true
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    restart: unless-stopped
+    stop_grace_period: 11m
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://localhost:8081/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  assistant:
+    build:
+      context: .
+      target: worker
+    environment:
+      AGENT_ID: assistant
+      CODEX_HOME: /codex
+      CLAUDE_CONFIG_DIR: /claude
+      RESEARCH_IDLE_TIMEOUT_SECONDS: ${RESEARCH_IDLE_TIMEOUT_SECONDS:-1200}
+    volumes:
+      - ./config/routes.json:/config/routes.json:ro
+      - ./config/profiles.json:/config/profiles.json:ro
+      - ./config/skills.json:/config/skills.json:ro
+      - ./data/assistant/codex:/codex
+      - claude:/claude
+      - ./data/assistant/workspace:/workspace
+    networks: [bridge, internet]
+    init: true
+    read_only: true
+    tmpfs: ["/tmp:size=256m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true, "seccomp=./config/seccomp.json"]
+    pids_limit: 256
+    mem_limit: 2g
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://localhost:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+networks:
+  bridge:
+    internal: true
+  internet: {}
+volumes:
+  database:
+  claude:

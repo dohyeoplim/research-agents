@@ -1,0 +1,16 @@
+{
+    "team": "T12345678",
+    "users": [
+        "U12345678"
+    ],
+    "channels": {
+        "C12345678": {
+            "name": "research",
+            "profile": "scholar",
+            "enabled": true,
+            "agent": "assistant",
+            "cwd": "research",
+            "instructions": "Help with literature research, source verification, reports and Slack Canvas documents."
+        }
+    }
+}
